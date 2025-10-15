@@ -1,0 +1,55 @@
+
+name: Create VPS (Auto Restart)
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [create-vps]
+
+env:
+  VPS_NAME: vps-project-1760497453123
+
+jobs:
+  deploy:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Checkout source
+      uses: actions/checkout@v4
+    - name: Setup VNC and Cloudflared Tunnel
+      run: |
+        $ErrorActionPreference = "Stop"
+        Invoke-WebRequest -Uri "https://www.tightvnc.com/download/2.8.63/tightvnc-2.8.63-gpl-setup-64bit.msi" -OutFile "tightvnc-setup.msi"
+        Start-Process msiexec.exe -Wait -ArgumentList '/i tightvnc-setup.msi /quiet /norestart ADDLOCAL="Server" SERVER_REGISTER_AS_SERVICE=1 SERVER_ADD_FIREWALL_EXCEPTION=1 SET_USEVNCAUTHENTICATION=1 VALUE_OF_USEVNCAUTHENTICATION=1 SET_PASSWORD=1 VALUE_OF_PASSWORD=ducknovis SET_ACCEPTHTTPCONNECTIONS=1 VALUE_OF_ACCEPTHTTPCONNECTIONS=1 SET_ALLOWLOOPBACK=1 VALUE_OF_ALLOWLOOPBACK=1'
+        Set-ItemProperty -Path "HKLM:\SOFTWARE\TightVNC\Server" -Name "AllowLoopback" -Value 1
+        Start-Process -FilePath "C:\Program Files\TightVNC\tvnserver.exe" -ArgumentList "-run"
+        Start-Sleep -s 10
+        Invoke-WebRequest -Uri "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe" -OutFile "cloudflared.exe"
+        Start-Process -FilePath "./cloudflared.exe" -ArgumentList "tunnel", "--url", "tcp://localhost:5900", "--logfile", "cloudflared.log", "--no-autoupdate" -WindowStyle Hidden
+        Start-Sleep -s 20
+        $cloudflaredLog = Get-Content -Path "cloudflared.log" -Wait -Tail 10
+        $tunnelUrl = $cloudflaredLog | Select-String -Pattern "tcp://(.+)" | ForEach-Object { $_.Matches.Groups[1].Value }
+        if ($tunnelUrl) {
+          "vnc://$tunnelUrl" | Out-File -FilePath "remote-link.txt"
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          git add remote-link.txt
+          git commit -m "Add remote VNC link"
+          git push
+          Write-Host "VNC Link: vnc://$tunnelUrl"
+        } else {
+          "Failed to get tunnel URL" | Out-File -FilePath "remote-link.txt"
+        }
+    - name: Keep Workflow Alive
+      run: |
+        Start-Sleep -s 19800 # 5.5 hours
+    - name: Auto Restart Workflow
+      if: always()
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        curl -X POST https://api.github.com/repos/backend-whizz/vps-project-1760497453123/dispatches \
+        -H "Accept: application/vnd.github.v3+json" \
+        -H "Authorization: token $GH_TOKEN" \
+        -d '{"event_type": "create-vps"}'
